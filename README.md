@@ -49,3 +49,7 @@ Releases are signed with the **debug key**, so this is a personal sideload build
 ## Credit
 
 Vulnerability research and the ADB recovery procedure: Mark Blaszczyk, [smsofdeath.com](https://smsofdeath.com/).
+
+## License
+
+[MIT](LICENSE)
