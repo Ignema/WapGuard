@@ -10,10 +10,12 @@ WAP Guard **does not prevent the crash**, because only the Android security patc
 
 Through [Shizuku](https://shizuku.rikka.app/) it runs, as the shell user, the same recovery steps the researcher published for ADB:
 
-1. Count rows in `content://sms/raw` whose destination port is WAP Push (2948).
-2. On **Clear**: temporarily allow `WRITE_SMS` for the shell, delete only those rows, then reset the permission.
+1. Find rows in `content://sms/raw` whose destination port is WAP Push (2948) and that have been **stuck for more than 2 minutes**. Legitimate WAP Push (MMS notifications, carrier provisioning) leaves the queue within milliseconds, so a message still being delivered is never touched.
+2. On **Clear**: read the shell's current `WRITE_SMS` app-op, temporarily allow it, delete exactly those row IDs, **restore the previous mode** (even if the delete fails), then re-query to verify they're gone.
 
-Ordinary pending SMS are left alone. With **Auto-clean** turned on, it checks every 15 minutes in the background while Shizuku is running and notifies you when it removes something.
+Every shell command has a timeout, and both its exit code and its output are checked. With **Auto-clean** turned on it checks roughly every 15 minutes; Android can delay this under Doze. The last result shows on the main screen, and you get a notification when something is removed **or when checks start failing**, for example after a reboot when Shizuku isn't running.
+
+The main screen also compares the device's security patch level with the first fixed level (2026-11-01). This is a quick indicator, not a code-level test: a vendor could backport the fix earlier.
 
 ## Requirements
 

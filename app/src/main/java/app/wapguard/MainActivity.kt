@@ -1,7 +1,9 @@
 package app.wapguard
 
 import android.Manifest
+import android.os.Build
 import android.os.Bundle
+import android.text.format.DateUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -80,6 +82,7 @@ private fun GuardScreen() {
     var result by remember { mutableStateOf<Result<Int>?>(null) }
     val context = LocalContext.current
     var auto by remember { mutableStateOf(isAutoClean(context)) }
+    var last by remember { mutableStateOf(lastCheck(context)) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     DisposableEffect(Unit) {
@@ -99,6 +102,7 @@ private fun GuardScreen() {
     fun run(clear: Boolean) = scope.launch {
         busy = true
         result = runCatching { withContext(Dispatchers.IO) { if (clear) clearWapPush(); pendingWapPush() } }
+        last = lastCheck(context)
         busy = false
     }
 
@@ -114,7 +118,7 @@ private fun GuardScreen() {
         Access.NotRunning -> "Shizuku isn't running.\nStart it in the Shizuku app, then retry."
         Access.NoPermission -> "WAP Guard needs Shizuku access to read the pending SMS queue."
         Access.Ready -> result?.fold(
-            onSuccess = { if (it == 0) "All clear.\nNo pending WAP Push messages." else "$it pending WAP Push message${if (it == 1) "" else "s"}." },
+            onSuccess = { if (it == 0) "All clear.\nNo stuck WAP Push messages." else "$it stuck WAP Push message${if (it == 1) "" else "s"}." },
             onFailure = { it.message ?: "Something went wrong." },
         ) ?: "Scanning…"
     }
@@ -137,6 +141,14 @@ private fun GuardScreen() {
             }
             Spacer(Modifier.height(40.dp))
             Text("WAP Guard", style = MaterialTheme.typography.headlineLargeEmphasized)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (isPatched()) "Security patch ${Build.VERSION.SECURITY_PATCH} includes the fix"
+                else "Security patch ${Build.VERSION.SECURITY_PATCH}: vulnerable until the November 2026 patch",
+                style = MaterialTheme.typography.labelLarge,
+                color = if (isPatched()) scheme.primary else scheme.error,
+                textAlign = TextAlign.Center,
+            )
             Spacer(Modifier.height(12.dp))
             Text(
                 message,
@@ -165,10 +177,15 @@ private fun GuardScreen() {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Auto-clean", style = MaterialTheme.typography.titleMedium)
+                        val check = last
                         Text(
-                            "Checks every 15 min while Shizuku is running",
+                            if (auto && check != null) {
+                                "${DateUtils.getRelativeTimeSpanString(check.time)} · ${check.text}"
+                            } else {
+                                "Checks about every 15 min while Shizuku is running"
+                            },
                             style = MaterialTheme.typography.bodySmall,
-                            color = scheme.onSurfaceVariant,
+                            color = if (auto && check?.ok == false) scheme.error else scheme.onSurfaceVariant,
                         )
                     }
                     Switch(auto, { on ->
