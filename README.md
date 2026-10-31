@@ -13,7 +13,7 @@ On **Android 12 and 13 there is no fix**: they run the same code and are out of 
 Through [Shizuku](https://shizuku.rikka.app/) it runs, as the shell user, the same recovery steps the researcher published for ADB:
 
 1. Find rows in `content://sms/raw` whose destination port is WAP Push (2948) and that have been **stuck for more than 2 minutes**. Legitimate WAP Push (MMS notifications, carrier provisioning) leaves the queue within milliseconds, so a message still being delivered is never touched.
-2. On **Clear**: read the shell's current `WRITE_SMS` app-op, temporarily allow it, delete exactly those row IDs, **restore the previous mode** (even if the delete fails), then re-query to verify they're gone.
+2. On **Clear**: read the shell's current `WRITE_SMS` app-op, temporarily allow it, delete exactly those row IDs, **restore the previous mode** (even if the delete fails), then re-query to verify they're gone. Only those IDs — narrower than the `address='<SENDER>'` delete in the published ADB steps, and it doesn't need to know the sender.
 
 A row's age can't simply be read off its `date` column. That column holds the PDU's service-centre timestamp, not a local receipt time — `InboundSmsHandler` passes `sms.getTimestampMillis()` straight into the row — so the sender's SMSC controls it, and a poison message dated years ahead would never look stuck. Rows dated further ahead than a minute of clock skew are therefore timed from when WAP Guard **first saw them** on the local clock instead.
 
@@ -31,22 +31,22 @@ One exclusive choice, **Off** by default:
 | **15 min** | WorkManager's floor, longer under Doze | None to speak of |
 | **30 s** | Watch mode, a foreground service | Ongoing notification, more battery |
 
-It's one picker rather than two switches because running both would be pointless: a 15-minute tick adds nothing over 30-second polling except contention for the shell app-op, which is global state and not per-caller.
+It's one picker rather than two switches because both at once was actively harmful, not merely redundant. `WRITE_SMS` is global shell state rather than per-caller, so two overlapping cleans fight over it: one restores the previous mode while the other is still deleting, and that delete fails. Cleans are serialised on a lock as well, since the manual **Clear** button could already overlap a background check.
 
 Polling is the only mechanism available. There is no event to hook: `WapPushOverSms.dispatchWapPdu` calls `decodeWapPdu` before it builds the `WAP_PUSH_DELIVER_ACTION` intent, so the decode throws inside `com.android.phone` and **no broadcast is ever dispatched** for a poison message. The poll interval is therefore the exposure window, which is the whole reason Watch mode exists — 15 minutes of crash-looping versus one or two crashes.
 
-Either way, opening the app cleans immediately rather than waiting for the next check.
+Whichever you pick, opening the app cleans immediately rather than waiting for the next check.
 
 ## Limitations
 
-**Neither option survives a reboot**, because Shizuku doesn't either without root. After the first forced restart you have to re-pair wireless debugging; Watch mode notices the dead binder, switches itself off instead of draining the battery on checks that can only fail, and tells you.
+**Nothing here survives a reboot**, because Shizuku doesn't either without root. After the first forced restart you have to re-pair wireless debugging; Watch mode notices the dead binder, switches itself off instead of draining the battery on checks that can only fail, and tells you.
 
 So under a sustained attack the honest answer is that WAP Guard shortens each crash but can't stop it. The real fixes are the October 2026 patch, or your carrier filtering binary SMS to port 2948.
 
 ## Requirements
 
 - Android 12+ with Shizuku running (wireless debugging is enough; root isn't needed)
-- On Samsung: set the app's battery usage to *Unrestricted* so the background check or Watch mode isn't killed
+- On Samsung: set the app's battery usage to *Unrestricted*, or background checking gets killed
 
 ## Build
 
