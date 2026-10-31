@@ -21,19 +21,29 @@ Every shell command has a timeout, and both its exit code and its output are che
 
 The main screen also compares the device's security patch level with the first fixed level (2026-10-01), and reports Android 12–13 as unpatchable. This is a quick indicator, not a code-level test: a vendor could backport the fix earlier.
 
+## Background checking
+
+Two options, both off by default:
+
+| | Interval | Cost |
+|---|---|---|
+| **Auto-clean** | ~15 min, longer under Doze | None to speak of |
+| **Watch mode** | 30 s | Ongoing notification, more battery |
+
+Polling is the only mechanism available. There is no event to hook: `WapPushOverSms.dispatchWapPdu` calls `decodeWapPdu` before it builds the `WAP_PUSH_DELIVER_ACTION` intent, so the decode throws inside `com.android.phone` and **no broadcast is ever dispatched** for a poison message. The poll interval is therefore the exposure window, which is the whole reason Watch mode exists — 15 minutes of crash-looping versus one or two crashes.
+
+Either way, opening the app cleans immediately rather than waiting for the next check.
+
 ## Limitations
 
-**Auto-clean cannot keep up with an attack in progress.** Be clear about what it is: a safety net for a single poison message that arrived while you weren't looking, not a defence under fire.
+**Neither option survives a reboot**, because Shizuku doesn't either without root. After the first forced restart you have to re-pair wireless debugging; Watch mode notices the dead binder, switches itself off instead of draining the battery on checks that can only fail, and tells you.
 
-- WorkManager's minimum period is 15 minutes, and Doze stretches it. A phone being crash-looped restarts every couple of minutes, so the tick loses the race.
-- Shizuku doesn't survive a reboot without root. After the first forced restart auto-clean is dead until you re-pair wireless debugging — you'll get the "Auto-clean isn't working" notification, if the phone is up long enough to show it.
-
-So opening the app is the reliable path, and with auto-clean on it cleans immediately on launch rather than waiting for a tick. Under a sustained attack, the real fixes are the October 2026 patch, or your carrier filtering binary SMS to port 2948.
+So under a sustained attack the honest answer is that WAP Guard shortens each crash but can't stop it. The real fixes are the October 2026 patch, or your carrier filtering binary SMS to port 2948.
 
 ## Requirements
 
 - Android 12+ with Shizuku running (wireless debugging is enough; root isn't needed)
-- On Samsung: set the app's battery usage to *Unrestricted* so the background check isn't killed
+- On Samsung: set the app's battery usage to *Unrestricted* so the background check or Watch mode isn't killed
 
 ## Build
 

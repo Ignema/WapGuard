@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
@@ -204,6 +205,7 @@ internal fun clearWapPush(context: Context): Int {
 private const val AUTO_WORK = "auto-clean"
 private const val PREFS = "settings"
 private const val KEY_AUTO = "auto"
+private const val KEY_WATCH = "watch"
 private const val KEY_LAST_TIME = "last_time"
 private const val KEY_LAST_TEXT = "last_text"
 private const val KEY_LAST_OK = "last_ok"
@@ -223,6 +225,38 @@ internal fun setAutoClean(context: Context, on: Boolean) {
     } else {
         work.cancelUniqueWork(AUTO_WORK)
     }
+}
+
+internal fun isWatch(context: Context) = prefs(context).getBoolean(KEY_WATCH, false)
+
+/**
+ * Watch mode polls every [WATCH_INTERVAL_MS] instead of WorkManager's 15-minute floor, at the cost of an
+ * ongoing notification and battery, so it is opt-in and separate from [setAutoClean].
+ */
+internal fun setWatch(context: Context, on: Boolean) {
+    prefs(context).edit().putBoolean(KEY_WATCH, on).apply()
+    val intent = Intent(context, WatchService::class.java)
+    if (on) context.startForegroundService(intent) else context.stopService(intent)
+}
+
+internal const val NOTIFY_CLEARED = 1
+internal const val NOTIFY_AUTO_FAILED = 2
+internal const val NOTIFY_WATCH_STOPPED = 4
+
+/** A one-shot notification. Watch mode's ongoing foreground notification is built in [WatchService]. */
+internal fun postNotification(context: Context, id: Int, title: String, text: String) {
+    if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+    context.getSystemService(NotificationManager::class.java).createNotificationChannel(
+        NotificationChannel(CHANNEL, "WAP Guard", NotificationManager.IMPORTANCE_DEFAULT),
+    )
+    val notification = NotificationCompat.Builder(context, CHANNEL)
+        .setSmallIcon(R.drawable.ic_shield)
+        .setContentTitle(title)
+        .setContentText(text)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+        .setAutoCancel(true)
+        .build()
+    NotificationManagerCompat.from(context).notify(id, notification)
 }
 
 /** Outcome of the most recent background check, for the main screen. */
@@ -265,12 +299,22 @@ class AutoCleanWorker(context: Context, params: WorkerParameters) : CoroutineWor
         outcome.fold(
             onSuccess = { removed ->
                 recordCheck(applicationContext, if (removed == 0) "All clear" else "Removed $removed stuck message${if (removed == 1) "" else "s"}", ok = true)
-                if (removed > 0) notify(1, "Malformed WAP Push cleared", "Removed $removed stuck message${if (removed == 1) "" else "s"} from the SMS queue.")
+                if (removed > 0) {
+                    postNotification(
+                        applicationContext, NOTIFY_CLEARED, "Malformed WAP Push cleared",
+                        "Removed $removed stuck message${if (removed == 1) "" else "s"} from the SMS queue.",
+                    )
+                }
             },
             onFailure = { e ->
                 val reason = e.message ?: "Unknown error"
                 recordCheck(applicationContext, "Check failed: $reason", ok = false)
-                if (wasOk) notify(2, "Auto-clean isn't working", "$reason. Open WAP Guard to fix it.")
+                if (wasOk) {
+                    postNotification(
+                        applicationContext, NOTIFY_AUTO_FAILED, "Auto-clean isn't working",
+                        "$reason. Open WAP Guard to fix it.",
+                    )
+                }
             },
         )
         return Result.success()
@@ -288,20 +332,4 @@ class AutoCleanWorker(context: Context, params: WorkerParameters) : CoroutineWor
             Shizuku.addBinderReceivedListenerSticky(listener)
         }
     } ?: false
-
-    private fun notify(id: Int, title: String, text: String) {
-        val context = applicationContext
-        if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        context.getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "WAP Guard", NotificationManager.IMPORTANCE_DEFAULT),
-        )
-        val notification = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(R.drawable.ic_shield)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setAutoCancel(true)
-            .build()
-        NotificationManagerCompat.from(context).notify(id, notification)
-    }
 }

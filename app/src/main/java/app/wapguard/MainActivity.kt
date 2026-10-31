@@ -55,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
@@ -88,6 +89,7 @@ private fun GuardScreen() {
     var result by remember { mutableStateOf<Result<Int>?>(null) }
     val context = LocalContext.current
     var auto by remember { mutableStateOf(isAutoClean(context)) }
+    var watch by remember { mutableStateOf(isWatch(context)) }
     var last by remember { mutableStateOf(lastCheck(context)) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -120,7 +122,12 @@ private fun GuardScreen() {
 
     // With auto-clean on, opening the app cleans straight away rather than waiting for the next 15-minute
     // tick — during an attack, launching WAP Guard is the only reliable way the clean ever runs.
-    LaunchedEffect(access) { if (access == Access.Ready) run(clear = isAutoClean(context)) }
+    LaunchedEffect(access) {
+        if (access != Access.Ready) return@LaunchedEffect
+        // Watch mode can't restart itself after a reboot, since Shizuku doesn't either; re-assert it here.
+        if (watch) setWatch(context, true)
+        run(clear = isAutoClean(context) || watch)
+    }
 
     val pending = result?.getOrNull() ?: 0
     val alert = pending > 0 || result?.isFailure == true
@@ -182,28 +189,54 @@ private fun GuardScreen() {
             }
             if (access == Access.Ready) {
                 Spacer(Modifier.height(32.dp))
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Auto-clean", style = MaterialTheme.typography.titleMedium)
-                        val check = last
-                        Text(
-                            if (auto && check != null) {
-                                "${DateUtils.getRelativeTimeSpanString(check.time)} · ${check.text}"
-                            } else {
-                                "Checks about every 15 min while Shizuku is running"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (auto && check?.ok == false) scheme.error else scheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(auto, { on ->
-                        if (on) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        setAutoClean(context, on)
-                        auto = on
-                    })
+                val check = last
+                val failing = (auto || watch) && check?.ok == false
+                SettingRow(
+                    title = "Auto-clean",
+                    subtitle = if (auto && check != null) {
+                        "${DateUtils.getRelativeTimeSpanString(check.time)} · ${check.text}"
+                    } else {
+                        "Checks about every 15 min while Shizuku is running"
+                    },
+                    subtitleColor = if (failing) scheme.error else scheme.onSurfaceVariant,
+                    checked = auto,
+                ) { on ->
+                    if (on) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    setAutoClean(context, on)
+                    auto = on
+                }
+                Spacer(Modifier.height(16.dp))
+                SettingRow(
+                    title = "Watch mode",
+                    subtitle = "Checks every ${WATCH_INTERVAL_MS / 1000}s instead. Uses more battery and keeps a notification.",
+                    subtitleColor = scheme.onSurfaceVariant,
+                    checked = watch,
+                ) { on ->
+                    if (on) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    setWatch(context, on)
+                    watch = on
                 }
             }
         }
+    }
+}
+
+/** A titled row with a switch, for the two background-checking options. */
+@Composable
+private fun SettingRow(
+    title: String,
+    subtitle: String,
+    subtitleColor: Color,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = subtitleColor)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked, onChange)
     }
 }
 
