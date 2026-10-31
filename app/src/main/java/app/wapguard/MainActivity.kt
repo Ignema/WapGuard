@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -33,7 +36,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -129,6 +135,8 @@ private fun GuardScreen() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
+            PatchChip()
+            Spacer(Modifier.height(28.dp))
             Box(
                 Modifier.size(168.dp).clip(MaterialShapes.Cookie9Sided.toShape()).background(container),
                 contentAlignment = Alignment.Center,
@@ -141,14 +149,6 @@ private fun GuardScreen() {
             }
             Spacer(Modifier.height(40.dp))
             Text("WAP Guard", style = MaterialTheme.typography.headlineLargeEmphasized)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                if (isPatched()) "Security patch ${Build.VERSION.SECURITY_PATCH} includes the fix"
-                else "Security patch ${Build.VERSION.SECURITY_PATCH}: vulnerable until the November 2026 patch",
-                style = MaterialTheme.typography.labelLarge,
-                color = if (isPatched()) scheme.primary else scheme.error,
-                textAlign = TextAlign.Center,
-            )
             Spacer(Modifier.height(12.dp))
             Text(
                 message,
@@ -196,5 +196,44 @@ private fun GuardScreen() {
                 }
             }
         }
+    }
+}
+
+/** Compact patch-status pill; tap for the details instead of spelling them out on the main screen. */
+@Composable
+private fun PatchChip() {
+    var open by remember { mutableStateOf(false) }
+    val patched = isPatched()
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        onClick = { open = true },
+        shape = CircleShape,
+        color = if (patched) scheme.primaryContainer else scheme.errorContainer,
+        contentColor = if (patched) scheme.onPrimaryContainer else scheme.onErrorContainer,
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(if (patched) scheme.primary else scheme.error))
+            Spacer(Modifier.width(8.dp))
+            Text(if (patched) "Patched" else "Not patched", style = MaterialTheme.typography.labelLarge)
+        }
+    }
+    if (open) {
+        AlertDialog(
+            onDismissRequest = { open = false },
+            confirmButton = { TextButton({ open = false }) { Text("OK") } },
+            title = { Text(if (patched) "Patched" else "Not patched yet") },
+            text = {
+                Text(
+                    "Security patch: ${Build.VERSION.SECURITY_PATCH}\n\n" +
+                        if (patched) {
+                            "This patch level includes the fix for the SMS of Death (CVE-2026-58882). WAP Guard is optional now."
+                        } else {
+                            "The fix for the SMS of Death (CVE-2026-58882) ships with the 2026-11-01 security patch. " +
+                                "Until then WAP Guard clears stuck messages, but it can't stop the crash itself.\n\n" +
+                                "This is based on the patch date only. If Samsung shipped the fix earlier, it won't show here."
+                        },
+                )
+            },
+        )
     }
 }
