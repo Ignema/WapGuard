@@ -4,7 +4,9 @@
 
 A tiny Android app that cleans up after the **"SMS of Death"** ([CVE-2026-58882](https://smsofdeath.com/)): a malformed WAP Push SMS that crashes `com.android.phone`, drops calls, and stays queued so the crash repeats until the message is removed.
 
-WAP Guard **does not prevent the crash**, because only the Android security patch (November 2026) fixes the bug. What it does is remove the stuck messages from the pending SMS queue so the problem doesn't keep coming back, and so the phone is less likely to end up in a reboot loop.
+WAP Guard **does not prevent the crash**, because only the Android security patch fixes the bug — the October 2026 bulletin, for Android 14–17. What it does is remove the stuck messages from the pending SMS queue so the problem doesn't keep coming back, and so the phone is less likely to end up in a reboot loop.
+
+On **Android 12 and 13 there is no fix**: they run the same code and are out of support, so cleanup is the only mitigation short of upgrading.
 
 ## How it works
 
@@ -15,7 +17,7 @@ Through [Shizuku](https://shizuku.rikka.app/) it runs, as the shell user, the sa
 
 Every shell command has a timeout, and both its exit code and its output are checked. With **Auto-clean** turned on it checks roughly every 15 minutes; Android can delay this under Doze. The last result shows on the main screen, and you get a notification when something is removed **or when checks start failing**, for example after a reboot when Shizuku isn't running.
 
-The main screen also compares the device's security patch level with the first fixed level (2026-11-01). This is a quick indicator, not a code-level test: a vendor could backport the fix earlier.
+The main screen also compares the device's security patch level with the first fixed level (2026-10-01), and reports Android 12–13 as unpatchable. This is a quick indicator, not a code-level test: a vendor could backport the fix earlier.
 
 ## Requirements
 

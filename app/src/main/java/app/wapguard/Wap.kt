@@ -32,8 +32,14 @@ private const val WAP_PORT = 2948
  */
 private const val STUCK_AFTER_MS = 2 * 60 * 1000L
 
-/** First Android security patch level that carries the fix (CVE-2026-58882, November 2026 bulletin). */
-private const val FIXED_PATCH = "2026-11-01"
+/** First Android security patch level that carries the fix (CVE-2026-58882, October 2026 bulletin). */
+private const val FIXED_PATCH = "2026-10-01"
+
+/**
+ * The fix was released for Android 14–17 only. Android 12 and 13 run the same vulnerable code and
+ * never receive it, whatever security patch level they report.
+ */
+private const val FIRST_FIXED_SDK = Build.VERSION_CODES.UPSIDE_DOWN_CAKE
 
 private val APP_OP_MODES = setOf("allow", "ignore", "deny", "default", "foreground")
 
@@ -45,8 +51,11 @@ internal fun currentAccess() = when {
     else -> Access.Ready
 }
 
+/** False on Android 12–13, where no fix is coming. */
+internal fun fixExistsForThisVersion() = Build.VERSION.SDK_INT >= FIRST_FIXED_SDK
+
 /** Whether this build's security patch level includes the fix. A heuristic: vendors can backport early. */
-internal fun isPatched() = Build.VERSION.SECURITY_PATCH >= FIXED_PATCH
+internal fun isPatched() = fixExistsForThisVersion() && Build.VERSION.SECURITY_PATCH >= FIXED_PATCH
 
 /**
  * Runs [cmd] as the shell user via Shizuku and returns its combined output.

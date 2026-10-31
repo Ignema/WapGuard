@@ -221,16 +221,21 @@ private fun PatchChip() {
         AlertDialog(
             onDismissRequest = { open = false },
             confirmButton = { TextButton({ open = false }) { Text("OK") } },
-            title = { Text(if (patched) "Patched" else "Not patched yet") },
+            title = { Text(if (patched) "Patched" else "Not patched") },
             text = {
                 Text(
                     "Security patch: ${Build.VERSION.SECURITY_PATCH}\n\n" +
-                        if (patched) {
-                            "This patch level includes the fix for the SMS of Death (CVE-2026-58882). WAP Guard is optional now."
-                        } else {
-                            "The fix for the SMS of Death (CVE-2026-58882) ships with the 2026-11-01 security patch. " +
-                                "Until then WAP Guard clears stuck messages, but it can't stop the crash itself.\n\n" +
-                                "This is based on the patch date only. If Samsung shipped the fix earlier, it won't show here."
+                        when {
+                            patched ->
+                                "This patch level includes the fix for the SMS of Death (CVE-2026-58882). WAP Guard is optional now."
+                            !fixExistsForThisVersion() ->
+                                "The fix for the SMS of Death (CVE-2026-58882) was only released for Android 14 and later. " +
+                                    "Android ${Build.VERSION.RELEASE} runs the same vulnerable code and won't receive it, " +
+                                    "so clearing stuck messages is the only mitigation short of upgrading."
+                            else ->
+                                "The fix for the SMS of Death (CVE-2026-58882) ships with the 2026-10-01 security patch. " +
+                                    "Until then WAP Guard clears stuck messages, but it can't stop the crash itself.\n\n" +
+                                    "This is based on the patch date only. If Samsung shipped the fix earlier, it won't show here."
                         },
                 )
             },
