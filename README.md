@@ -15,9 +15,20 @@ Through [Shizuku](https://shizuku.rikka.app/) it runs, as the shell user, the sa
 1. Find rows in `content://sms/raw` whose destination port is WAP Push (2948) and that have been **stuck for more than 2 minutes**. Legitimate WAP Push (MMS notifications, carrier provisioning) leaves the queue within milliseconds, so a message still being delivered is never touched.
 2. On **Clear**: read the shell's current `WRITE_SMS` app-op, temporarily allow it, delete exactly those row IDs, **restore the previous mode** (even if the delete fails), then re-query to verify they're gone.
 
-Every shell command has a timeout, and both its exit code and its output are checked. With **Auto-clean** turned on it checks roughly every 15 minutes; Android can delay this under Doze. The last result shows on the main screen, and you get a notification when something is removed **or when checks start failing**, for example after a reboot when Shizuku isn't running.
+A row's age can't simply be read off its `date` column. That column holds the PDU's service-centre timestamp, not a local receipt time — `InboundSmsHandler` passes `sms.getTimestampMillis()` straight into the row — so the sender's SMSC controls it, and a poison message dated years ahead would never look stuck. Rows dated further ahead than a minute of clock skew are therefore timed from when WAP Guard **first saw them** on the local clock instead.
+
+Every shell command has a timeout, and both its exit code and its output are checked. A `WRITE_SMS` grant left behind by a run that was killed mid-clean is revoked on the next check, since `finally` doesn't run when the process dies.
 
 The main screen also compares the device's security patch level with the first fixed level (2026-10-01), and reports Android 12–13 as unpatchable. This is a quick indicator, not a code-level test: a vendor could backport the fix earlier.
+
+## Limitations
+
+**Auto-clean cannot keep up with an attack in progress.** Be clear about what it is: a safety net for a single poison message that arrived while you weren't looking, not a defence under fire.
+
+- WorkManager's minimum period is 15 minutes, and Doze stretches it. A phone being crash-looped restarts every couple of minutes, so the tick loses the race.
+- Shizuku doesn't survive a reboot without root. After the first forced restart auto-clean is dead until you re-pair wireless debugging — you'll get the "Auto-clean isn't working" notification, if the phone is up long enough to show it.
+
+So opening the app is the reliable path, and with auto-clean on it cleans immediately on launch rather than waiting for a tick. Under a sustained attack, the real fixes are the October 2026 patch, or your carrier filtering binary SMS to port 2948.
 
 ## Requirements
 
@@ -28,9 +39,12 @@ The main screen also compares the device's security patch level with the first f
 
 ```sh
 ./gradlew assembleRelease
+./gradlew testReleaseUnitTest   # row parsing, staleness, app-op mode
 ```
 
 Kotlin and Jetpack Compose with Material 3 Expressive, minSdk 31, compileSdk 36.
+
+Releases are signed with the **debug key**, so this is a personal sideload build: the debug key is universally known, so don't treat an APK from here as authenticated — build it yourself if that matters to you.
 
 ## Credit
 

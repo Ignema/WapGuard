@@ -20,6 +20,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuRemoteProcess
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.coroutines.resume
 
@@ -31,6 +32,14 @@ private const val WAP_PORT = 2948
  * Only rows older than this are treated as stuck, so a message mid-delivery is never touched.
  */
 private const val STUCK_AFTER_MS = 2 * 60 * 1000L
+
+/**
+ * The raw table's `date` is **not** a local receipt time: InboundSmsHandler passes the PDU's service-centre
+ * timestamp (`sms.getTimestampMillis()`) into the row, so whoever sends the message controls it. A row dated
+ * further ahead than this much skew is therefore not trusted for age, and is timed from when WAP Guard first
+ * saw it instead — otherwise a future-dated poison PDU would never be classified as stuck.
+ */
+private const val SKEW_MS = 60 * 1000L
 
 /** First Android security patch level that carries the fix (CVE-2026-58882, October 2026 bulletin). */
 private const val FIXED_PATCH = "2026-10-01"
@@ -57,6 +66,58 @@ internal fun fixExistsForThisVersion() = Build.VERSION.SDK_INT >= FIRST_FIXED_SD
 /** Whether this build's security patch level includes the fix. A heuristic: vendors can backport early. */
 internal fun isPatched() = fixExistsForThisVersion() && Build.VERSION.SECURITY_PATCH >= FIXED_PATCH
 
+// ---------------------------------------------------------------------------
+// Pure parsing and classification. Kept free of Android calls so it is unit-testable; a silent regression
+// here would report "All clear" on an infected phone.
+// ---------------------------------------------------------------------------
+
+/** One row of the pending-SMS queue. */
+internal data class RawRow(val id: Long, val port: Int, val date: Long)
+
+/** Parses `content query` output. A row missing any projected field is skipped. */
+internal fun parseRawRows(output: String): List<RawRow> {
+    fun field(row: String, name: String) = Regex("\\b$name=(-?\\d+)").find(row)?.groupValues?.get(1)?.toLongOrNull()
+    return output.lines().filter { it.startsWith("Row:") }.mapNotNull { row ->
+        RawRow(
+            id = field(row, "_id") ?: return@mapNotNull null,
+            port = (field(row, "destination_port") ?: return@mapNotNull null).toInt(),
+            date = field(row, "date") ?: return@mapNotNull null,
+        )
+    }
+}
+
+internal fun isWapPush(row: RawRow) = row.port and 0xFFFF == WAP_PORT
+
+/**
+ * Rows queued for longer than [STUCK_AFTER_MS]. A row dated in the future carries an untrusted timestamp,
+ * so it is aged from [firstSeen] — WAP Guard's own first sighting on the local clock — rather than its `date`.
+ * The same fallback covers a device clock that runs behind the network's.
+ */
+internal fun stuckIds(rows: List<RawRow>, firstSeen: Map<Long, Long>, now: Long): List<Long> =
+    rows.filter { row ->
+        val trusted = row.date <= now + SKEW_MS
+        val since = if (trusted) row.date else (firstSeen[row.id] ?: now).coerceAtMost(now)
+        now - since > STUCK_AFTER_MS
+    }.map { it.id }
+
+/** `id:millis` pairs. Ids that have left the queue are dropped, so the record can't grow without bound. */
+internal fun encodeFirstSeen(seen: Map<Long, Long>) = seen.entries.joinToString(";") { "${it.key}:${it.value}" }
+
+internal fun decodeFirstSeen(raw: String): Map<Long, Long> = raw.split(';').mapNotNull { entry ->
+    val parts = entry.split(':').takeIf { it.size == 2 } ?: return@mapNotNull null
+    val id = parts[0].toLongOrNull() ?: return@mapNotNull null
+    val time = parts[1].toLongOrNull() ?: return@mapNotNull null
+    id to time
+}.toMap()
+
+/** The shell's WRITE_SMS mode from `cmd appops get` output; `default` when it can't be read. */
+internal fun parseAppOpMode(output: String) =
+    Regex("WRITE_SMS: (\\w+)").find(output)?.groupValues?.get(1)?.takeIf { it in APP_OP_MODES } ?: "default"
+
+// ---------------------------------------------------------------------------
+// Shell access
+// ---------------------------------------------------------------------------
+
 /**
  * Runs [cmd] as the shell user via Shizuku and returns its combined output.
  * Throws on timeout, a non-zero exit code, or an error printed by the `content`/`cmd` tools.
@@ -67,53 +128,75 @@ private fun sh(cmd: String, timeoutSeconds: Long = 15): String {
         "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java,
     ).apply { isAccessible = true }
     val process = newProcess.invoke(null, arrayOf("sh", "-c", "$cmd 2>&1"), null, null) as ShizukuRemoteProcess
-    var output = ""
-    val reader = thread { output = process.inputStream.bufferedReader().readText() }
-    if (!process.waitForTimeout(timeoutSeconds, TimeUnit.SECONDS)) {
-        process.destroy()
-        error("Timed out after ${timeoutSeconds}s: ${cmd.substringBefore(' ')}")
-    }
+    val output = AtomicReference("")
+    val reader = thread { output.set(runCatching { process.inputStream.bufferedReader().readText() }.getOrDefault("")) }
+    val finished = process.waitForTimeout(timeoutSeconds, TimeUnit.SECONDS)
+    // destroy() closes the stream, which unblocks the reader so the thread isn't left behind on timeout.
+    if (!finished) process.destroy()
     reader.join(2_000)
+    if (!finished) error("Timed out after ${timeoutSeconds}s: ${cmd.substringBefore(' ')}")
+    val text = output.get()
     val exit = process.exitValue()
-    if (exit != 0 || "Exception" in output || output.startsWith("Error")) {
-        error(output.trim().lineSequence().firstOrNull()?.ifEmpty { null } ?: "Command failed (exit $exit)")
+    if (exit != 0 || "Exception" in text || text.startsWith("Error")) {
+        error(text.trim().lineSequence().firstOrNull()?.ifEmpty { null } ?: "Command failed (exit $exit)")
     }
-    return output
+    return text
 }
+
+private const val KEY_SEEN = "first_seen"
 
 /** IDs of WAP Push rows that have been sitting in the telephony raw queue for longer than [STUCK_AFTER_MS]. */
-private fun stuckWapPushIds(): List<Long> {
+private fun stuckWapPushIds(context: Context): List<Long> {
     val out = sh("content query --uri content://sms/raw --projection _id:destination_port:date --where \"deleted=0\"")
-    val rows = out.lines().filter { it.startsWith("Row:") }
-    if (rows.isEmpty() && "No result found" !in out) error(out.trim().ifEmpty { "Query failed" })
-    val cutoff = System.currentTimeMillis() - STUCK_AFTER_MS
-    fun field(row: String, name: String) = Regex("\\b$name=(-?\\d+)").find(row)?.groupValues?.get(1)?.toLongOrNull()
-    return rows.mapNotNull { row ->
-        val id = field(row, "_id") ?: return@mapNotNull null
-        val port = field(row, "destination_port") ?: return@mapNotNull null
-        val date = field(row, "date") ?: return@mapNotNull null
-        id.takeIf { port.toInt() and 0xFFFF == WAP_PORT && date < cutoff }
+    if (out.lines().none { it.startsWith("Row:") } && "No result found" !in out) {
+        error(out.trim().ifEmpty { "Query failed" })
     }
+    val wap = parseRawRows(out).filter(::isWapPush)
+    val now = System.currentTimeMillis()
+    return stuckIds(wap, trackFirstSeen(context, wap.map { it.id }, now), now)
 }
 
-internal fun pendingWapPush(): Int = stuckWapPushIds().size
+/** Records when each queued row was first seen on the local clock, and forgets rows that have left the queue. */
+private fun trackFirstSeen(context: Context, ids: List<Long>, now: Long): Map<Long, Long> {
+    val store = prefs(context)
+    val previous = decodeFirstSeen(store.getString(KEY_SEEN, "").orEmpty())
+    // coerceAtMost guards a clock that has moved backwards since the row was first seen.
+    val current = ids.associateWith { (previous[it] ?: now).coerceAtMost(now) }
+    if (current != previous) store.edit().putString(KEY_SEEN, encodeFirstSeen(current)).apply()
+    return current
+}
+
+internal fun pendingWapPush(context: Context): Int = stuckWapPushIds(context).size
+
+/**
+ * Undoes a WRITE_SMS grant left behind when a previous clean was killed between granting and restoring —
+ * `finally` does not run if the process dies, and this app is most likely to be killed mid-clean on a phone
+ * that is actively crash-looping. Revoking to `default` is the safe direction even if something else set it.
+ */
+internal fun revokeLeakedShellWriteSms() {
+    if (parseAppOpMode(sh("cmd appops get com.android.shell WRITE_SMS")) == "allow") {
+        sh("cmd appops set com.android.shell WRITE_SMS default")
+    }
+}
 
 /**
  * Mirrors the researcher's ADB recovery for exactly the stuck rows found: temporarily allow shell WRITE_SMS,
  * delete those row IDs, restore the previous app-op mode, then verify they're gone. Returns how many were removed.
  */
-internal fun clearWapPush(): Int {
-    val ids = stuckWapPushIds()
+internal fun clearWapPush(context: Context): Int {
+    val ids = stuckWapPushIds(context)
     if (ids.isEmpty()) return 0
-    val previous = Regex("WRITE_SMS: (\\w+)").find(sh("cmd appops get com.android.shell WRITE_SMS"))
-        ?.groupValues?.get(1)?.takeIf { it in APP_OP_MODES } ?: "default"
+    // An `allow` already in place is a grant leaked by an earlier killed run; restoring it would make the
+    // grant permanent, so fall back to `default`.
+    val previous = parseAppOpMode(sh("cmd appops get com.android.shell WRITE_SMS"))
+        .let { if (it == "allow") "default" else it }
     try {
         sh("cmd appops set com.android.shell WRITE_SMS allow")
         sh("content delete --uri content://sms/raw --where \"_id IN (${ids.joinToString(",")})\"")
     } finally {
         sh("cmd appops set com.android.shell WRITE_SMS $previous")
     }
-    val remaining = stuckWapPushIds().intersect(ids.toSet()).size
+    val remaining = stuckWapPushIds(context).intersect(ids.toSet()).size
     if (remaining > 0) error("$remaining stuck message${if (remaining == 1) "" else "s"} couldn't be removed")
     return ids.size
 }
@@ -135,7 +218,8 @@ internal fun setAutoClean(context: Context, on: Boolean) {
     val work = WorkManager.getInstance(context)
     if (on) {
         val request = PeriodicWorkRequestBuilder<AutoCleanWorker>(15, TimeUnit.MINUTES).build()
-        work.enqueueUniquePeriodicWork(AUTO_WORK, ExistingPeriodicWorkPolicy.KEEP, request)
+        // UPDATE, not KEEP: a later change to the interval or constraints must reach existing installs.
+        work.enqueueUniquePeriodicWork(AUTO_WORK, ExistingPeriodicWorkPolicy.UPDATE, request)
     } else {
         work.cancelUniqueWork(AUTO_WORK)
     }
@@ -150,9 +234,21 @@ internal fun lastCheck(context: Context): LastCheck? {
     return if (time == 0L) null else LastCheck(time, p.getString(KEY_LAST_TEXT, "").orEmpty(), p.getBoolean(KEY_LAST_OK, true))
 }
 
+internal fun recordCheck(context: Context, text: String, ok: Boolean) {
+    prefs(context).edit()
+        .putLong(KEY_LAST_TIME, System.currentTimeMillis())
+        .putString(KEY_LAST_TEXT, text)
+        .putBoolean(KEY_LAST_OK, ok)
+        .apply()
+}
+
 /**
  * Every ~15 min (Android's minimum; Doze can stretch it): if Shizuku is up, clear stuck WAP Push rows.
  * Every outcome is recorded for the main screen; you're notified on a cleanup, and when checks start failing.
+ *
+ * This cannot keep up with an attack in progress — see the README. A phone being crash-looped reboots faster
+ * than the 15-minute floor, and Shizuku does not survive a reboot without root, so the realistic value here is
+ * catching a single poison message that arrived while you weren't looking.
  */
 class AutoCleanWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
@@ -160,29 +256,24 @@ class AutoCleanWorker(context: Context, params: WorkerParameters) : CoroutineWor
         val ready = awaitShizuku() && currentAccess() == Access.Ready
         val outcome = runCatching {
             check(ready) { "Shizuku isn't running" }
-            withContext(Dispatchers.IO) { clearWapPush() }
+            withContext(Dispatchers.IO) {
+                runCatching { revokeLeakedShellWriteSms() }
+                clearWapPush(applicationContext)
+            }
         }
         val wasOk = lastCheck(applicationContext)?.ok ?: true
         outcome.fold(
             onSuccess = { removed ->
-                record(if (removed == 0) "All clear" else "Removed $removed stuck message${if (removed == 1) "" else "s"}", ok = true)
+                recordCheck(applicationContext, if (removed == 0) "All clear" else "Removed $removed stuck message${if (removed == 1) "" else "s"}", ok = true)
                 if (removed > 0) notify(1, "Malformed WAP Push cleared", "Removed $removed stuck message${if (removed == 1) "" else "s"} from the SMS queue.")
             },
             onFailure = { e ->
                 val reason = e.message ?: "Unknown error"
-                record("Check failed: $reason", ok = false)
+                recordCheck(applicationContext, "Check failed: $reason", ok = false)
                 if (wasOk) notify(2, "Auto-clean isn't working", "$reason. Open WAP Guard to fix it.")
             },
         )
         return Result.success()
-    }
-
-    private fun record(text: String, ok: Boolean) {
-        prefs(applicationContext).edit()
-            .putLong(KEY_LAST_TIME, System.currentTimeMillis())
-            .putString(KEY_LAST_TEXT, text)
-            .putBoolean(KEY_LAST_OK, ok)
-            .apply()
     }
 
     private suspend fun awaitShizuku() = withTimeoutOrNull(5_000) {

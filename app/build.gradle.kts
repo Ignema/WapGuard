@@ -12,8 +12,8 @@ android {
         applicationId = "app.wapguard"
         minSdk = 31
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
     }
 
     buildTypes {
@@ -41,4 +41,5 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.0")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
+    testImplementation(kotlin("test"))
 }

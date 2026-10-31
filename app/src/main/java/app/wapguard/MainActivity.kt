@@ -107,12 +107,20 @@ private fun GuardScreen() {
 
     fun run(clear: Boolean) = scope.launch {
         busy = true
-        result = runCatching { withContext(Dispatchers.IO) { if (clear) clearWapPush(); pendingWapPush() } }
+        result = runCatching {
+            withContext(Dispatchers.IO) {
+                runCatching { revokeLeakedShellWriteSms() }
+                if (clear) clearWapPush(context)
+                pendingWapPush(context)
+            }
+        }
         last = lastCheck(context)
         busy = false
     }
 
-    LaunchedEffect(access) { if (access == Access.Ready) run(clear = false) }
+    // With auto-clean on, opening the app cleans straight away rather than waiting for the next 15-minute
+    // tick — during an attack, launching WAP Guard is the only reliable way the clean ever runs.
+    LaunchedEffect(access) { if (access == Access.Ready) run(clear = isAutoClean(context)) }
 
     val pending = result?.getOrNull() ?: 0
     val alert = pending > 0 || result?.isFailure == true
