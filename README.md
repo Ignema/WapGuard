@@ -31,11 +31,30 @@ One exclusive choice, **Off** by default:
 | **15 min** | WorkManager's floor, longer under Doze | None to speak of |
 | **30 s** | Watch mode, a foreground service | Ongoing notification, more battery |
 
-It's one picker rather than two switches because both at once was actively harmful, not merely redundant. `WRITE_SMS` is global shell state rather than per-caller, so two overlapping cleans fight over it: one restores the previous mode while the other is still deleting, and that delete fails. Cleans are serialised on a lock as well, since the manual **Clear** button could already overlap a background check.
+One picker rather than two toggles, because the intervals aren't additive: `WRITE_SMS` is global shell state rather than per-caller, so two cleans running at once fight over it — one restores the previous mode while the other is still deleting, and that delete fails. Cleans are serialised on a lock for the same reason, since the manual **Clear** button can overlap a background check.
 
 Polling is the only mechanism available. There is no event to hook: `WapPushOverSms.dispatchWapPdu` calls `decodeWapPdu` before it builds the `WAP_PUSH_DELIVER_ACTION` intent, so the decode throws inside `com.android.phone` and **no broadcast is ever dispatched** for a poison message. The poll interval is therefore the exposure window, which is the whole reason Watch mode exists — 15 minutes of crash-looping versus one or two crashes.
 
 Whichever you pick, opening the app cleans immediately rather than waiting for the next check.
+
+## If it's happening right now
+
+Clearing the queue ends it. The rows are only dangerous because they sit in `content://sms/raw` and get retried on every boot, so once they're deleted the loop is broken — nothing is left corrupted, and no further cleanup is needed unless more messages arrive.
+
+The catch is that a phone restarting every couple of minutes may not stay up long enough for you to do anything, so it's worth knowing what cutting the radio buys you.
+
+**Airplane mode, or pulling the SIM, stops new copies arriving.** A message the phone never acknowledges gets re-sent by the carrier — the research reports one message causing intermittent outages for up to a week. No radio means no delivery and no retries, which gives you a stable phone to work on.
+
+What it doesn't do:
+
+- **It doesn't clean anything.** Rows already queued are retried on every boot regardless of the radio, so if you're already looping you still have to clear them. Airplane mode blocks the next copy, not the one you already have.
+- **The messages wait for you.** Whatever the carrier hasn't delivered stays on its side and arrives when you reconnect.
+- **You have no service, including emergency calls.** That's what the attack was taking from you anyway, so treat it as a holding measure.
+- **eSIM makes it harder.** You can't pull an eSIM, and disabling one means getting through Settings on a phone that keeps restarting.
+
+Moving the SIM to a non-Android phone is worth considering: that device acknowledges the pending messages, so the carrier stops re-sending, and you can then clear the Android phone without fresh copies landing mid-cleanup. That follows from the retry behaviour rather than being a published step.
+
+As an absolute last resort, `adb shell pm clear com.android.providers.telephony` empties the queue — along with **all your SMS, MMS and APN settings**. Clearing the specific rows, which is what this app does, is almost always enough.
 
 ## Limitations
 
