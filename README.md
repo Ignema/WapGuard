@@ -23,12 +23,15 @@ The main screen also compares the device's security patch level with the first f
 
 ## Background checking
 
-Two options, both off by default:
+One exclusive choice, **Off** by default:
 
 | | Interval | Cost |
 |---|---|---|
-| **Auto-clean** | ~15 min, longer under Doze | None to speak of |
-| **Watch mode** | 30 s | Ongoing notification, more battery |
+| **Off** | — | Scans when you open the app |
+| **15 min** | WorkManager's floor, longer under Doze | None to speak of |
+| **30 s** | Watch mode, a foreground service | Ongoing notification, more battery |
+
+It's one picker rather than two switches because running both would be pointless: a 15-minute tick adds nothing over 30-second polling except contention for the shell app-op, which is global state and not per-caller.
 
 Polling is the only mechanism available. There is no event to hook: `WapPushOverSms.dispatchWapPdu` calls `decodeWapPdu` before it builds the `WAP_PUSH_DELIVER_ACTION` intent, so the decode throws inside `com.android.phone` and **no broadcast is ever dispatched** for a poison message. The poll interval is therefore the exposure window, which is the whole reason Watch mode exists — 15 minutes of crash-looping versus one or two crashes.
 

@@ -181,10 +181,19 @@ internal fun revokeLeakedShellWriteSms() {
 }
 
 /**
+ * WRITE_SMS is global shell state, not per-caller, so two cleans running at once would stomp each other:
+ * one restores the previous mode while the other is still deleting, and that delete fails. The manual
+ * button, the periodic worker and Watch mode all share this process, so one lock is enough.
+ */
+private val cleanLock = Any()
+
+/**
  * Mirrors the researcher's ADB recovery for exactly the stuck rows found: temporarily allow shell WRITE_SMS,
  * delete those row IDs, restore the previous app-op mode, then verify they're gone. Returns how many were removed.
  */
-internal fun clearWapPush(context: Context): Int {
+internal fun clearWapPush(context: Context): Int = synchronized(cleanLock) { clearLocked(context) }
+
+private fun clearLocked(context: Context): Int {
     val ids = stuckWapPushIds(context)
     if (ids.isEmpty()) return 0
     // An `allow` already in place is a grant leaked by an earlier killed run; restoring it would make the
@@ -231,12 +240,29 @@ internal fun isWatch(context: Context) = prefs(context).getBoolean(KEY_WATCH, fa
 
 /**
  * Watch mode polls every [WATCH_INTERVAL_MS] instead of WorkManager's 15-minute floor, at the cost of an
- * ongoing notification and battery, so it is opt-in and separate from [setAutoClean].
+ * ongoing notification and battery.
  */
 internal fun setWatch(context: Context, on: Boolean) {
     prefs(context).edit().putBoolean(KEY_WATCH, on).apply()
     val intent = Intent(context, WatchService::class.java)
     if (on) context.startForegroundService(intent) else context.stopService(intent)
+}
+
+/**
+ * How often WAP Guard checks on its own. One choice rather than two switches: Watch mode polls every 30s,
+ * so a 15-minute tick alongside it does nothing except race it for the shell app-op.
+ */
+internal enum class Checks { Off, Periodic, Watch }
+
+internal fun checks(context: Context) = when {
+    isWatch(context) -> Checks.Watch
+    isAutoClean(context) -> Checks.Periodic
+    else -> Checks.Off
+}
+
+internal fun setChecks(context: Context, mode: Checks) {
+    setWatch(context, mode == Checks.Watch)
+    setAutoClean(context, mode == Checks.Periodic)
 }
 
 internal const val NOTIFY_CLEARED = 1

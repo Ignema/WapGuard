@@ -36,8 +36,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
@@ -55,7 +57,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
@@ -88,8 +89,7 @@ private fun GuardScreen() {
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<Result<Int>?>(null) }
     val context = LocalContext.current
-    var auto by remember { mutableStateOf(isAutoClean(context)) }
-    var watch by remember { mutableStateOf(isWatch(context)) }
+    var mode by remember { mutableStateOf(checks(context)) }
     var last by remember { mutableStateOf(lastCheck(context)) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -125,8 +125,8 @@ private fun GuardScreen() {
     LaunchedEffect(access) {
         if (access != Access.Ready) return@LaunchedEffect
         // Watch mode can't restart itself after a reboot, since Shizuku doesn't either; re-assert it here.
-        if (watch) setWatch(context, true)
-        run(clear = isAutoClean(context) || watch)
+        if (mode == Checks.Watch) setWatch(context, true)
+        run(clear = mode != Checks.Off)
     }
 
     val pending = result?.getOrNull() ?: 0
@@ -189,54 +189,61 @@ private fun GuardScreen() {
             }
             if (access == Access.Ready) {
                 Spacer(Modifier.height(32.dp))
-                val check = last
-                val failing = (auto || watch) && check?.ok == false
-                SettingRow(
-                    title = "Auto-clean",
-                    subtitle = if (auto && check != null) {
-                        "${DateUtils.getRelativeTimeSpanString(check.time)} · ${check.text}"
-                    } else {
-                        "Checks about every 15 min while Shizuku is running"
-                    },
-                    subtitleColor = if (failing) scheme.error else scheme.onSurfaceVariant,
-                    checked = auto,
-                ) { on ->
-                    if (on) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    setAutoClean(context, on)
-                    auto = on
-                }
-                Spacer(Modifier.height(16.dp))
-                SettingRow(
-                    title = "Watch mode",
-                    subtitle = "Checks every ${WATCH_INTERVAL_MS / 1000}s instead. Uses more battery and keeps a notification.",
-                    subtitleColor = scheme.onSurfaceVariant,
-                    checked = watch,
-                ) { on ->
-                    if (on) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    setWatch(context, on)
-                    watch = on
+                ChecksPicker(mode, last) { picked ->
+                    if (picked != Checks.Off) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    setChecks(context, picked)
+                    mode = picked
                 }
             }
         }
     }
 }
 
-/** A titled row with a switch, for the two background-checking options. */
+/**
+ * How often to check, as one exclusive choice. Two independent switches invited turning both on, where the
+ * 15-minute tick adds nothing over Watch mode except a race for the shell app-op.
+ */
 @Composable
-private fun SettingRow(
-    title: String,
-    subtitle: String,
-    subtitleColor: Color,
-    checked: Boolean,
-    onChange: (Boolean) -> Unit,
-) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = subtitleColor)
+private fun ChecksPicker(mode: Checks, last: LastCheck?, onPick: (Checks) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth()) {
+        Text("Background checks", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(10.dp))
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            Checks.entries.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = mode == option,
+                    onClick = { onPick(option) },
+                    shape = SegmentedButtonDefaults.itemShape(index, Checks.entries.size),
+                    label = {
+                        Text(
+                            when (option) {
+                                Checks.Off -> "Off"
+                                Checks.Periodic -> "15 min"
+                                Checks.Watch -> "${WATCH_INTERVAL_MS / 1000}s"
+                            },
+                        )
+                    },
+                )
+            }
         }
-        Spacer(Modifier.width(12.dp))
-        Switch(checked, onChange)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            when (mode) {
+                Checks.Off -> "Nothing runs in the background. Open WAP Guard to scan."
+                Checks.Periodic -> "Checks about every 15 min while Shizuku is running. Doze can delay it."
+                Checks.Watch -> "Checks every ${WATCH_INTERVAL_MS / 1000}s. Uses more battery and keeps a notification."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
+        )
+        if (mode != Checks.Off && last != null) {
+            Text(
+                "${DateUtils.getRelativeTimeSpanString(last.time)} · ${last.text}",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (last.ok) scheme.onSurfaceVariant else scheme.error,
+            )
+        }
     }
 }
 
