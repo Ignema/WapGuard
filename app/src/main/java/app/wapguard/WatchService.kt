@@ -36,24 +36,41 @@ internal const val ACTION_STOP_WATCH = "app.wapguard.STOP_WATCH"
  * waiting for WorkManager's 15-minute floor. Off by default — it keeps a notification up and costs battery.
  *
  * It cannot survive a reboot, because Shizuku doesn't either without root. If the binder dies the service
- * turns itself off rather than burning battery on checks that can only fail.
+ * stops rather than burning battery on checks that can only fail — but it leaves the Watch pref on, so the
+ * choice survives for [BootReceiver] and [MainActivity] to resume once Shizuku is back.
  */
 class WatchService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var loop: Job? = null
 
+    companion object {
+        /**
+         * Whether the service is live, for [watchStalled]. A foreground service keeps its process alive, so
+         * this is only ever true while the service really is running: if the process dies the flag dies with
+         * it, and the next read correctly says the service is gone.
+         */
+        @Volatile
+        internal var running = false
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // A null intent is START_STICKY restarting us after a kill; don't come back if Watch was turned off.
-        if (intent?.action == ACTION_STOP_WATCH || !isWatch(this)) {
+        if (intent?.action == ACTION_STOP_WATCH) {
             setWatch(this, false)
             return START_NOT_STICKY
         }
+        if (!isWatch(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         post("Watching the SMS queue", "Checking every ${WATCH_INTERVAL_MS / 1000}s")
+        running = true
         // onStartCommand runs again every time the app re-asserts the service; keep a single loop.
         if (loop == null) loop = scope.launch { watch() }
-        return START_STICKY
+        // Not sticky: a relaunch with a null intent would only resume polling a Shizuku that a kill or reboot
+        // already took away. Resuming is BootReceiver's and MainActivity's job, once access is real again.
+        return START_NOT_STICKY
     }
 
     private suspend fun CoroutineScope.watch() {
@@ -79,12 +96,13 @@ class WatchService : Service() {
                     val reason = e.message ?: "Unknown error"
                     recordCheck(applicationContext, "Watch failed: $reason", ok = false)
                     if (!Shizuku.pingBinder()) {
-                        // Shizuku won't come back on its own, so stop instead of polling a dead binder.
+                        // Shizuku won't come back on its own, so stop instead of polling a dead binder. The
+                        // pref stays on: Watch mode is paused, not something the user turned off.
                         postNotification(
-                            applicationContext, NOTIFY_WATCH_STOPPED, "Watch mode stopped",
-                            "$reason. Open WAP Guard to start it again.",
+                            applicationContext, NOTIFY_WATCH_STOPPED, "Watch mode is paused",
+                            "$reason. Start Shizuku, then open WAP Guard to resume.",
                         )
-                        setWatch(applicationContext, false)
+                        stopSelf()
                         return
                     }
                     post("Watch hit an error", reason)
@@ -95,6 +113,7 @@ class WatchService : Service() {
     }
 
     override fun onDestroy() {
+        running = false
         scope.cancel()
         loop = null
         super.onDestroy()

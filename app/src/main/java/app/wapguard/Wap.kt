@@ -249,6 +249,13 @@ internal fun setWatch(context: Context, on: Boolean) {
 }
 
 /**
+ * Watch mode is switched on but its service isn't running — after a reboot, an app update, or Shizuku going
+ * away. The pref deliberately stays on so the choice survives, which means it alone can't be trusted to
+ * describe what is happening; this is what keeps the picker from promising checks that nothing is performing.
+ */
+internal fun watchStalled(context: Context) = isWatch(context) && !WatchService.running
+
+/**
  * How often WAP Guard checks on its own. One choice rather than two switches: Watch mode polls every 30s,
  * so a 15-minute tick alongside it does nothing except race it for the shell app-op.
  */

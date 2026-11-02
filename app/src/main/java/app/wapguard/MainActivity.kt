@@ -90,6 +90,7 @@ private fun GuardScreen() {
     var result by remember { mutableStateOf<Result<Int>?>(null) }
     val context = LocalContext.current
     var mode by remember { mutableStateOf(checks(context)) }
+    var stalled by remember { mutableStateOf(watchStalled(context)) }
     var last by remember { mutableStateOf(lastCheck(context)) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -123,9 +124,14 @@ private fun GuardScreen() {
     // With auto-clean on, opening the app cleans straight away rather than waiting for the next 15-minute
     // tick — during an attack, launching WAP Guard is the only reliable way the clean ever runs.
     LaunchedEffect(access) {
-        if (access != Access.Ready) return@LaunchedEffect
-        // Watch mode can't restart itself after a reboot, since Shizuku doesn't either; re-assert it here.
+        // Watch mode can't restart itself after a reboot, since Shizuku doesn't either; re-assert it here,
+        // which is the point at which a paused Watch mode becomes a running one again.
+        if (access != Access.Ready) {
+            stalled = watchStalled(context)
+            return@LaunchedEffect
+        }
         if (mode == Checks.Watch) setWatch(context, true)
+        stalled = watchStalled(context)
         run(clear = mode != Checks.Off)
     }
 
@@ -189,10 +195,11 @@ private fun GuardScreen() {
             }
             if (access == Access.Ready) {
                 Spacer(Modifier.height(32.dp))
-                ChecksPicker(mode, last) { picked ->
+                ChecksPicker(mode, stalled, last) { picked ->
                     if (picked != Checks.Off) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     setChecks(context, picked)
                     mode = picked
+                    stalled = watchStalled(context)
                 }
             }
         }
@@ -204,7 +211,7 @@ private fun GuardScreen() {
  * 15-minute tick adds nothing over Watch mode except a race for the shell app-op.
  */
 @Composable
-private fun ChecksPicker(mode: Checks, last: LastCheck?, onPick: (Checks) -> Unit) {
+private fun ChecksPicker(mode: Checks, stalled: Boolean, last: LastCheck?, onPick: (Checks) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth()) {
         Text("Background checks", style = MaterialTheme.typography.titleMedium)
@@ -229,13 +236,17 @@ private fun ChecksPicker(mode: Checks, last: LastCheck?, onPick: (Checks) -> Uni
         }
         Spacer(Modifier.height(10.dp))
         Text(
-            when (mode) {
-                Checks.Off -> "Nothing runs in the background. Open WAP Guard to scan."
-                Checks.Periodic -> "Checks about every 15 min while Shizuku is running. Doze can delay it."
-                Checks.Watch -> "Checks every ${WATCH_INTERVAL_MS / 1000}s. Uses more battery and keeps a notification."
+            when {
+                // Watch mode's service dies with the process, so saying "every 30s" while nothing is running
+                // would be a promise the app isn't keeping.
+                mode == Checks.Watch && stalled ->
+                    "Paused since the last restart — Shizuku has to be started again. Nothing is being checked."
+                mode == Checks.Off -> "Nothing runs in the background. Open WAP Guard to scan."
+                mode == Checks.Periodic -> "Checks about every 15 min while Shizuku is running. Doze can delay it."
+                else -> "Checks every ${WATCH_INTERVAL_MS / 1000}s. Uses more battery and keeps a notification."
             },
             style = MaterialTheme.typography.bodySmall,
-            color = scheme.onSurfaceVariant,
+            color = if (mode == Checks.Watch && stalled) scheme.error else scheme.onSurfaceVariant,
         )
         if (mode != Checks.Off && last != null) {
             Text(
